@@ -4,13 +4,16 @@
 #
 # Created with: PyCharm
 
-import time
+import sys
 import argparse
+import concurrent.futures
 import io
 import os
+import time
+import urllib.error
 import urllib.request
+import zipfile
 from html.parser import HTMLParser, unescape
-import concurrent.futures
 
 OBEX_LISTING_FILE_LINK = 'http://obex.parallax.com/projects/?field_category_tid=All&items_per_page=All'
 DEFAULT_OBEX_LISTING_FILE = os.path.join(os.getcwd(), 'obex.html')
@@ -21,7 +24,7 @@ DEFAULT_COMPLETE_OBEX_DIR = os.path.join(os.getcwd(), 'complete_obex')
 class ObexListParser(HTMLParser):
     LINK_HEADER = 'Link'
 
-    def __init__(self, output):
+    def __init__(self, output=None):
         """
         :param output: Output file
         :type output io.TextIOWrapper
@@ -34,19 +37,19 @@ class ObexListParser(HTMLParser):
         self._currentRow = None
 
     def feed(self, data):
-        self._output.write('"%s",' % self.LINK_HEADER)
+        self._write_to_output('"%s",' % self.LINK_HEADER)
         super().feed(data)
         return self._table
 
     def handle_endtag(self, tag):
         if tag == 'tr':
-            self._output.write('\n')
+            self._write_to_output('\n')
             if self._currentRow:
                 self._table.append(self._currentRow)
                 self._currentRow = None
         elif tag == 'td':
             self._inCell = False
-            self._output.write(',')
+            self._write_to_output(',')
 
     def handle_data(self, data):
         """
@@ -56,7 +59,7 @@ class ObexListParser(HTMLParser):
         if self._inCell:
             content = ' '.join(data.strip().split())
             if content:
-                self._output.write('"%s"' % content)
+                self._write_to_output('"%s"' % content)
                 self._currentRow.append(content)
 
     def handle_starttag(self, tag, attrs):
@@ -69,11 +72,15 @@ class ObexListParser(HTMLParser):
         elif tag == 'a' and self._inCell:
             attribute_dict = dict(attrs)
             url = unescape(attribute_dict['href'])
-            self._output.write('"%s",' % url)
+            self._write_to_output('"%s",' % url)
             self._currentRow.append(url)
 
     def error(self, message):
         raise Exception(message)
+
+    def _write_to_output(self, content):
+        if self._output:
+            self._output.write(content)
 
 
 class ObexObjectParser(HTMLParser):
@@ -116,8 +123,15 @@ def run():
     args = parse_args()
 
     listing = os.path.expanduser(args.listing)
-    table_file_path = os.path.expanduser(args.table)
+    if args.table:
+        table_file_path = os.path.expanduser(args.table)
+    else:
+        table_file_path = None
     output_directory = os.path.expanduser(args.output)
+
+    if os.path.exists(output_directory):
+        print('Can not proceed! The output directory (%s) already exists.' % output_directory, file=sys.stderr)
+        exit(1)
 
     print('Downloading. Please wait...')
     start_time = time.time()
@@ -134,9 +148,12 @@ def parse_obex_listing(listingFile, table_file_path):
     with open(listingFile, 'r') as html_file:
         html_content = html_file.read()
 
-    with open(table_file_path, 'w') as csv_file:
-        parser = ObexListParser(csv_file)
-        return parser.feed(html_content)
+    if table_file_path:
+        with open(table_file_path, 'w') as csv_file:
+            parser = ObexListParser(csv_file)
+            return parser.feed(html_content)
+    else:
+        return ObexListParser().feed(html_content)
 
 
 def download_obex_object_metadata(link, project_title):
@@ -168,26 +185,61 @@ def download_all_objects(metadata, obex_dir):
             project_dir_name = project_title.replace('/', '_')
             project_dir = os.path.join(obex_dir, project_dir_name)
             os.makedirs(project_dir)
-            for artifact in project_artifacts:
-                futures.append(executor.submit(download_object, project_dir, artifact[0], artifact[1]))
+            futures.append(executor.submit(download_object, project_dir, project_artifacts))
         [future.result() for future in futures]
 
 
-def download_object(directory, url, name):
-    with open(os.path.join(directory, name), 'wb') as output:
-        with urllib.request.urlopen(url) as response:
-            output.write(response.read())
+def download_object(directory, artifacts):
+    """
+    Download an object from the OBEX
+    :param directory Output directory for the artifacts
+    :type directory str
+    :param artifacts: List of name/url tuples of artifacts for the given OBEX object
+    :type artifacts tuple
+    """
+    for url, name in artifacts:
+        try:
+            output_path = os.path.join(directory, name)
+            with open(output_path, 'wb') as output:
+                with urllib.request.urlopen(url) as response:
+                    output.write(response.read())
+
+            zips = find_zips(directory)
+            while zips:
+                for z in zips:
+                    extract_and_remove(z, os.path.dirname(z))
+                zips = find_zips(directory)
+        except urllib.error.HTTPError:
+            print('Failed to download from %s! Sorry about that :(' % url)
+
+
+def find_zips(directory):
+    result = []
+    for root, directories, files in os.walk(directory):
+        for f in files:
+            if f.lower().endswith('.zip'):
+                result.append(os.path.join(root, f))
+    return result
+
+
+def extract_and_remove(file_path, directory):
+    try:
+        with zipfile.ZipFile(file_path, 'r') as zip_file:
+            zip_file.extractall(directory)
+    except zipfile.BadZipFile as e:
+        raise Exception('Failed to extract ' + file_path, e)
+    os.remove(file_path)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser()
 
     parser.add_argument('-l', '--listing', default=DEFAULT_OBEX_LISTING_FILE,
                         help='Path to the complete OBEX listing file. Download it from here: ' + OBEX_LISTING_FILE_LINK)
-    parser.add_argument('-t', '--table', default=DEFAULT_TABLE_FILE,
-                        help='Output file for the CSV-formatted OBEX table.')
+    parser.add_argument('-t', '--table', help='Output file for the CSV-formatted OBEX table. If not provided, it will '
+                                              'only be stored temporarily in-memory and not written to disk.')
     parser.add_argument('-o', '--output', default=DEFAULT_COMPLETE_OBEX_DIR,
-                        help='Output directory for the complete OBEX. The directory MUST NOT exist.')
+                        help='Output directory for the complete and uncompressed OBEX. The directory MUST NOT exist.')
 
     return parser.parse_args()
 
