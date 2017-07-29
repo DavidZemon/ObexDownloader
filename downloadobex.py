@@ -205,9 +205,11 @@ def download_object(directory, artifacts):
                     output.write(response.read())
 
             zips = find_zips(directory)
-            while zips:
+            extracted_zips = []
+            while set(zips) - set(extracted_zips):
                 for z in zips:
-                    extract_and_remove(z, os.path.dirname(z))
+                    extract(z, os.path.dirname(z))
+                extracted_zips += zips
                 zips = find_zips(directory)
         except urllib.error.HTTPError:
             print('Failed to download from %s! Sorry about that :(' % url)
@@ -222,13 +224,12 @@ def find_zips(directory):
     return result
 
 
-def extract_and_remove(file_path, directory):
+def extract(file_path, directory):
     try:
         with zipfile.ZipFile(file_path, 'r') as zip_file:
             zip_file.extractall(directory)
     except zipfile.BadZipFile as e:
         raise Exception('Failed to extract ' + file_path, e)
-    os.remove(file_path)
 
 
 def parse_args():
