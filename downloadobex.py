@@ -180,7 +180,7 @@ def download_object(directory, url, name):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('-l', '--listing', default=DEFAULT_OBEX_LISTING_FILE,
                         help='Path to the complete OBEX listing file. Download it from here: ' + OBEX_LISTING_FILE_LINK)
