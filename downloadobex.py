@@ -118,10 +118,6 @@ class ObexObjectParser(HTMLParser):
 def run() -> None:
     args = parse_args()
 
-    if args.table:
-        table_file_path = os.path.expanduser(args.table)
-    else:
-        table_file_path = None
     output_directory = os.path.expanduser(args.output)
 
     if os.path.exists(output_directory):
@@ -131,7 +127,7 @@ def run() -> None:
     print('Downloading. Please wait...')
     start_time = time.time()
     listing = get_obex_listing(OBEX_LISTING_FILE_LINK)
-    table = parse_obex_listing(listing, table_file_path)
+    table = ObexListParser().feed(listing)
     metadata = download_all_metadata(table)
     download_all_objects(metadata, output_directory)
     elapsed_time = time.time() - start_time
@@ -141,15 +137,6 @@ def run() -> None:
 def get_obex_listing(link: str) -> str:
     response = urllib.request.urlopen(link)
     return response.read().decode()
-
-
-def parse_obex_listing(html_content: str, table_file_path: str) -> List[List[str]]:
-    if table_file_path:
-        with open(table_file_path, 'w') as csv_file:
-            parser = ObexListParser(csv_file)
-            return parser.feed(html_content)
-    else:
-        return ObexListParser().feed(html_content)
 
 
 def download_all_metadata(table: List[List[str]]) -> Dict[str, List[str]]:
@@ -230,8 +217,6 @@ def extract(file_path: str, directory: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-t', '--table', help='Output file for the CSV-formatted OBEX table. If not provided, it will '
-                                              'only be stored temporarily in-memory and not written to disk.')
     parser.add_argument('-o', '--output', default=DEFAULT_COMPLETE_OBEX_DIR,
                         help='Output directory for the complete and uncompressed OBEX. The directory MUST NOT exist.')
 
