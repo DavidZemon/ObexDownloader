@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# @file    obexparser
+# @file    downloadobex
 # @author  David Zemon
 #
 # Created with: PyCharm
@@ -7,36 +7,32 @@
 import sys
 import argparse
 import concurrent.futures
-import io
 import os
 import time
 import urllib.error
 import urllib.request
 import zipfile
 from html.parser import HTMLParser, unescape
+from typing import TextIO, Tuple, List, Dict
 
 OBEX_LISTING_FILE_LINK = 'http://obex.parallax.com/projects/?field_category_tid=All&items_per_page=All'
-DEFAULT_OBEX_LISTING_FILE = os.path.join(os.getcwd(), 'obex.html')
-DEFAULT_TABLE_FILE = os.path.join(os.getcwd(), 'obex_table.csv')
 DEFAULT_COMPLETE_OBEX_DIR = os.path.join(os.getcwd(), 'complete_obex')
 
 
 class ObexListParser(HTMLParser):
     LINK_HEADER = 'Link'
 
-    def __init__(self, output=None):
-        """
-        :param output: Output file
-        :type output io.TextIOWrapper
-        """
+    def __init__(self, output: TextIO = None):
         super().__init__()
         self._output = output
+        self._inHeader = False
         self._inCell = False
         self._inLink = False
         self._table = []
         self._currentRow = None
+        self._skip = True
 
-    def feed(self, data):
+    def feed(self, data) -> List[List[str]]:
         self._write_to_output('"%s",' % self.LINK_HEADER)
         super().feed(data)
         return self._table
@@ -50,29 +46,29 @@ class ObexListParser(HTMLParser):
         elif tag == 'td':
             self._inCell = False
             self._write_to_output(',')
+        elif tag == 'th':
+            self._inHeader = False
 
-    def handle_data(self, data):
-        """
-        :param data:
-        :type data str
-        """
+    def handle_data(self, data: str):
         if self._inCell:
             content = ' '.join(data.strip().split())
             if content:
-                self._write_to_output('"%s"' % content)
+                self._write_to_output('"{}"'.format(content))
                 self._currentRow.append(content)
 
     def handle_starttag(self, tag, attrs):
-        if tag == 'td':
+        if tag == 'td' or tag == 'th':
+            if tag == 'th':
+                self._inHeader = True
             self._inCell = True
         if tag == 'tr':
             self._currentRow = []
             if not self._table:
                 self._currentRow.append(self.LINK_HEADER)
-        elif tag == 'a' and self._inCell:
+        elif tag == 'a' and self._inCell and not self._inHeader:
             attribute_dict = dict(attrs)
             url = unescape(attribute_dict['href'])
-            self._write_to_output('"%s",' % url)
+            self._write_to_output('"{}",'.format(url))
             self._currentRow.append(url)
 
     def error(self, message):
@@ -91,7 +87,7 @@ class ObexObjectParser(HTMLParser):
         self._weMadeIt = False
         self._links = []
 
-    def feed(self, data):
+    def feed(self, data) -> List[str]:
         super().feed(data)
         return self._links
 
@@ -113,16 +109,15 @@ class ObexObjectParser(HTMLParser):
         elif tag == 'a' and self._wereAlmostThere:
             self._weMadeIt = True
             attribute_dict = dict(attrs)
-            self._links.append(['http://obex.parallax.com' + unescape(attribute_dict['href'])])
+            self._links.append([unescape(attribute_dict['href'])])
 
     def error(self, message):
         raise Exception(message)
 
 
-def run():
+def run() -> None:
     args = parse_args()
 
-    listing = os.path.expanduser(args.listing)
     if args.table:
         table_file_path = os.path.expanduser(args.table)
     else:
@@ -135,6 +130,7 @@ def run():
 
     print('Downloading. Please wait...')
     start_time = time.time()
+    listing = get_obex_listing(OBEX_LISTING_FILE_LINK)
     table = parse_obex_listing(listing, table_file_path)
     metadata = download_all_metadata(table)
     download_all_objects(metadata, output_directory)
@@ -142,12 +138,12 @@ def run():
     print('All done! Download completed in %0.1f seconds.' % elapsed_time)
 
 
-def parse_obex_listing(listingFile, table_file_path):
-    assert os.path.exists(listingFile) and os.path.isfile(listingFile)
+def get_obex_listing(link: str) -> str:
+    response = urllib.request.urlopen(link)
+    return response.read().decode()
 
-    with open(listingFile, 'r') as html_file:
-        html_content = html_file.read()
 
+def parse_obex_listing(html_content: str, table_file_path: str) -> List[List[str]]:
     if table_file_path:
         with open(table_file_path, 'w') as csv_file:
             parser = ObexListParser(csv_file)
@@ -156,20 +152,12 @@ def parse_obex_listing(listingFile, table_file_path):
         return ObexListParser().feed(html_content)
 
 
-def download_obex_object_metadata(link, project_title):
-    with urllib.request.urlopen(link) as response:
-        html = response.read().decode()
-    object_parser = ObexObjectParser()
-    object_links = object_parser.feed(html)
-    return project_title, object_links
-
-
-def download_all_metadata(table):
+def download_all_metadata(table: List[List[str]]) -> Dict[str, List[str]]:
     link_index = table[0].index(ObexListParser.LINK_HEADER)
     project_title_index = table[0].index('Project Title')
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
-        for row in table[1:]:
+        for row in table[1:-1]:
             link = row[link_index]
             project_title = row[project_title_index]
             futures.append(executor.submit(download_obex_object_metadata, link, project_title))
@@ -177,7 +165,16 @@ def download_all_metadata(table):
     return dict(results)
 
 
-def download_all_objects(metadata, obex_dir):
+def download_obex_object_metadata(link: str, project_title: str) -> Tuple[str, List[str]]:
+    full_link = 'http://obex.parallax.com' + link
+    with urllib.request.urlopen(full_link) as response:
+        html = response.read().decode()
+    object_parser = ObexObjectParser()
+    object_links = object_parser.feed(html)
+    return project_title, object_links
+
+
+def download_all_objects(metadata: Dict[str, List[str]], obex_dir) -> None:
     os.makedirs(obex_dir, exist_ok=False)
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
@@ -189,13 +186,11 @@ def download_all_objects(metadata, obex_dir):
         [future.result() for future in futures]
 
 
-def download_object(directory, artifacts):
+def download_object(directory: str, artifacts: List[Tuple[str]]) -> None:
     """
     Download an object from the OBEX
     :param directory Output directory for the artifacts
-    :type directory str
     :param artifacts: List of name/url tuples of artifacts for the given OBEX object
-    :type artifacts tuple
     """
     for url, name in artifacts:
         try:
@@ -211,11 +206,11 @@ def download_object(directory, artifacts):
                     extract(z, os.path.dirname(z))
                 extracted_zips += zips
                 zips = find_zips(directory)
-        except urllib.error.HTTPError:
-            print('Failed to download from %s! Sorry about that :(' % url)
+        except Exception as e:
+            print('Failed to download from {0}! Sorry about that :( -- {1}'.format(url, str(e)))
 
 
-def find_zips(directory):
+def find_zips(directory: str) -> List[str]:
     result = []
     for root, directories, files in os.walk(directory):
         for f in files:
@@ -224,7 +219,7 @@ def find_zips(directory):
     return result
 
 
-def extract(file_path, directory):
+def extract(file_path: str, directory: str) -> None:
     try:
         with zipfile.ZipFile(file_path, 'r') as zip_file:
             zip_file.extractall(directory)
@@ -232,11 +227,9 @@ def extract(file_path, directory):
         raise Exception('Failed to extract ' + file_path, e)
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-l', '--listing', default=DEFAULT_OBEX_LISTING_FILE,
-                        help='Path to the complete OBEX listing file. Download it from here: ' + OBEX_LISTING_FILE_LINK)
     parser.add_argument('-t', '--table', help='Output file for the CSV-formatted OBEX table. If not provided, it will '
                                               'only be stored temporarily in-memory and not written to disk.')
     parser.add_argument('-o', '--output', default=DEFAULT_COMPLETE_OBEX_DIR,
