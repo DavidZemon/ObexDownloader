@@ -3,10 +3,9 @@
 # @author  David Zemon
 #
 # Created with: PyCharm
-
-import sys
 import argparse
 import concurrent.futures
+import logging
 import os
 import time
 import urllib.error
@@ -17,6 +16,8 @@ from typing import TextIO, Tuple, List, Dict
 
 OBEX_LISTING_FILE_LINK = 'http://obex.parallax.com/projects/?field_category_tid=All&items_per_page=All'
 DEFAULT_COMPLETE_OBEX_DIR = os.path.join(os.getcwd(), 'complete_obex')
+
+logging.basicConfig(level=logging.INFO)
 
 
 class ObexListParser(HTMLParser):
@@ -115,23 +116,28 @@ class ObexObjectParser(HTMLParser):
         raise Exception(message)
 
 
+class DownloadFailedException(Exception):
+    def __init__(self, link: str) -> None:
+        super().__init__(link)
+
+
 def run() -> None:
     args = parse_args()
 
     output_directory = os.path.expanduser(args.output)
 
     if os.path.exists(output_directory):
-        print('Can not proceed! The output directory (%s) already exists.' % output_directory, file=sys.stderr)
+        logging.error('Can not proceed! The output directory (%s) already exists.', output_directory)
         exit(1)
 
-    print('Downloading. Please wait...')
+    logging.info('Downloading. Please wait...')
     start_time = time.time()
     listing = get_obex_listing(OBEX_LISTING_FILE_LINK)
     table = ObexListParser().feed(listing)
     metadata = download_all_metadata(table)
     download_all_objects(metadata, output_directory)
     elapsed_time = time.time() - start_time
-    print('All done! Download completed in %0.1f seconds.' % elapsed_time)
+    logging.info('All done! Download completed in %0.1f seconds.', elapsed_time)
 
 
 def get_obex_listing(link: str) -> str:
@@ -148,17 +154,25 @@ def download_all_metadata(table: List[List[str]]) -> Dict[str, List[str]]:
             link = row[link_index]
             project_title = row[project_title_index]
             futures.append(executor.submit(download_obex_object_metadata, link, project_title))
-    results = [future.result() for future in futures]
+    results = []
+    for future in futures:
+        try:
+            results.append(future.result())
+        except DownloadFailedException:
+            logging.exception('Download failed')
     return dict(results)
 
 
 def download_obex_object_metadata(link: str, project_title: str) -> Tuple[str, List[str]]:
     full_link = 'http://obex.parallax.com' + link
-    with urllib.request.urlopen(full_link) as response:
-        html = response.read().decode()
-    object_parser = ObexObjectParser()
-    object_links = object_parser.feed(html)
-    return project_title, object_links
+    try:
+        with urllib.request.urlopen(full_link) as response:
+            html = response.read().decode()
+        object_parser = ObexObjectParser()
+        object_links = object_parser.feed(html)
+        return project_title, object_links
+    except urllib.error.HTTPError as e:
+        raise DownloadFailedException(full_link) from e
 
 
 def download_all_objects(metadata: Dict[str, List[str]], obex_dir) -> None:
