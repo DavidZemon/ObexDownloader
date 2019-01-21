@@ -6,6 +6,7 @@
 import argparse
 import concurrent.futures
 import logging
+import multiprocessing
 import os
 import time
 import urllib.error
@@ -135,7 +136,7 @@ def run() -> None:
     listing = get_obex_listing(OBEX_LISTING_FILE_LINK)
     table = ObexListParser().feed(listing)
     metadata = download_all_metadata(table)
-    download_all_objects(metadata, output_directory)
+    download_all_objects(metadata, output_directory, args.jobs)
     elapsed_time = time.time() - start_time
     logging.info('All done! Download completed in %0.1f seconds.', elapsed_time)
 
@@ -175,9 +176,9 @@ def download_obex_object_metadata(link: str, project_title: str) -> Tuple[str, L
         raise DownloadFailedException(full_link) from e
 
 
-def download_all_objects(metadata: Dict[str, List[str]], obex_dir) -> None:
+def download_all_objects(metadata: Dict[str, List[str]], obex_dir: str, job_count: int) -> None:
     os.makedirs(obex_dir, exist_ok=False)
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=job_count) as executor:
         futures = []
         for project_title, project_artifacts in metadata.items():
             project_dir_name = project_title.replace('/', '_')
@@ -233,6 +234,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument('-o', '--output', default=DEFAULT_COMPLETE_OBEX_DIR,
                         help='Output directory for the complete and uncompressed OBEX. The directory MUST NOT exist.')
+    parser.add_argument('-j', '--jobs', default=multiprocessing.cpu_count()*2,
+                        help='Maximum number of objects to download in parallel')
 
     return parser.parse_args()
 
